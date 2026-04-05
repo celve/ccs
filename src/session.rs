@@ -176,10 +176,9 @@ pub fn load_sessions() -> Vec<Session> {
 
 /// Scan transcript files for finished sessions not in the active set.
 fn load_finished_sessions(claude_dir: &Path, out: &mut Vec<Session>) {
-    // Collect active session IDs and their cwds
+    // Collect active session IDs
     let sessions_dir = claude_dir.join("sessions");
     let mut active_ids = HashSet::new();
-    let mut active_cwds = HashSet::new();
     if let Ok(entries) = fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -189,7 +188,6 @@ fn load_finished_sessions(claude_dir: &Path, out: &mut Vec<Session>) {
             if let Ok(content) = fs::read_to_string(&path) {
                 if let Ok(meta) = serde_json::from_str::<SessionMeta>(&content) {
                     active_ids.insert(meta.session_id);
-                    active_cwds.insert(meta.cwd);
                 }
             }
         }
@@ -248,11 +246,6 @@ fn load_finished_sessions(claude_dir: &Path, out: &mut Vec<Session>) {
                 Some(c) => c,
                 None => continue,
             };
-
-            // Skip if there's already an active session for this cwd
-            if active_cwds.contains(&cwd) {
-                continue;
-            }
 
             let started_at = match meta.started_at {
                 Some(ts) => ts.with_timezone(&Local),
