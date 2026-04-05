@@ -64,15 +64,21 @@ fn is_pid_alive(pid: u32) -> bool {
 }
 
 /// Find the transcript JSONL file for a session.
+/// Uses the most recently modified .jsonl in the project dir, since
+/// /resume and /clear create new transcripts while keeping the same PID.
 fn find_transcript(claude_dir: &Path, cwd: &str, session_id: &str) -> Option<PathBuf> {
     let projects_dir = claude_dir.join("projects");
     let key = cwd_to_project_key(cwd);
-    let primary = projects_dir.join(&key).join(format!("{session_id}.jsonl"));
-    if primary.exists() {
-        return Some(primary);
+    let project_dir = projects_dir.join(&key);
+
+    if project_dir.is_dir() {
+        // Find the most recently modified .jsonl in this project dir
+        if let Some(newest) = find_newest_jsonl(&project_dir) {
+            return Some(newest);
+        }
     }
 
-    // Fallback: search all project dirs
+    // Fallback: exact match by session ID across all project dirs
     if let Ok(entries) = fs::read_dir(&projects_dir) {
         for entry in entries.flatten() {
             let candidate = entry.path().join(format!("{session_id}.jsonl"));
@@ -83,6 +89,21 @@ fn find_transcript(claude_dir: &Path, cwd: &str, session_id: &str) -> Option<Pat
     }
 
     None
+}
+
+/// Find the most recently modified .jsonl file in a directory.
+fn find_newest_jsonl(dir: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    entries
+        .flatten()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                == Some("jsonl")
+        })
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .map(|e| e.path())
 }
 
 /// Load all sessions from ~/.claude/sessions/ and enrich with transcript data.
@@ -100,6 +121,7 @@ pub fn load_sessions() -> Vec<Session> {
     };
 
     let mut sessions = Vec::new();
+    let mut claimed_transcripts: HashSet<PathBuf> = HashSet::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -127,10 +149,13 @@ pub fn load_sessions() -> Vec<Session> {
         // Check PID liveness
         let alive = is_pid_alive(meta.pid);
 
-        // Find and read transcript
-        let transcript_info =
-            find_transcript(&claude_dir, &meta.cwd, &meta.session_id)
-                .and_then(|path| transcript::read_transcript_tail(&path));
+        // Find and read transcript (uses newest .jsonl in project dir)
+        let transcript_path = find_transcript(&claude_dir, &meta.cwd, &meta.session_id);
+        if let Some(ref tp) = transcript_path {
+            claimed_transcripts.insert(tp.clone());
+        }
+        let transcript_info = transcript_path
+            .and_then(|path| transcript::read_transcript_tail(&path));
 
         let (state, last_activity) = match transcript_info {
             Some(info) => {
@@ -168,30 +193,18 @@ pub fn load_sessions() -> Vec<Session> {
         });
     }
 
-    // Scan for finished sessions (transcripts with no matching session file)
-    load_finished_sessions(&claude_dir, &mut sessions);
+    // Scan for finished sessions (transcripts not claimed by any active session)
+    load_finished_sessions(&claude_dir, &claimed_transcripts, &mut sessions);
 
     sessions
 }
 
 /// Scan transcript files for finished sessions not in the active set.
-fn load_finished_sessions(claude_dir: &Path, out: &mut Vec<Session>) {
-    // Collect active session IDs
-    let sessions_dir = claude_dir.join("sessions");
-    let mut active_ids = HashSet::new();
-    if let Ok(entries) = fs::read_dir(&sessions_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(meta) = serde_json::from_str::<SessionMeta>(&content) {
-                    active_ids.insert(meta.session_id);
-                }
-            }
-        }
-    }
+fn load_finished_sessions(
+    claude_dir: &Path,
+    claimed: &HashSet<PathBuf>,
+    out: &mut Vec<Session>,
+) {
 
     let projects_dir = claude_dir.join("projects");
     let project_dirs = match fs::read_dir(&projects_dir) {
@@ -216,13 +229,8 @@ fn load_finished_sessions(claude_dir: &Path, out: &mut Vec<Session>) {
                 continue;
             }
 
-            let session_id = t_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-
-            // Skip if this is an active session
-            if active_ids.contains(session_id) {
+            // Skip if this transcript is claimed by an active session
+            if claimed.contains(&t_path) {
                 continue;
             }
 
