@@ -1,0 +1,16 @@
+[package]
+name = "ccs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+colored = "3"
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+strip = true
+lto = true
