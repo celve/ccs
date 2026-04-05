@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use std::collections::HashSet;
+
 use crate::transcript::{self, TranscriptState};
 
 #[derive(Deserialize)]
@@ -166,5 +168,104 @@ pub fn load_sessions() -> Vec<Session> {
         });
     }
 
+    // Scan for finished sessions (transcripts with no matching session file)
+    load_finished_sessions(&claude_dir, &mut sessions);
+
     sessions
+}
+
+/// Scan transcript files for finished sessions not in the active set.
+fn load_finished_sessions(claude_dir: &Path, out: &mut Vec<Session>) {
+    // Collect active session IDs by re-reading session files
+    let sessions_dir = claude_dir.join("sessions");
+    let mut active_ids = HashSet::new();
+    if let Ok(entries) = fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(meta) = serde_json::from_str::<SessionMeta>(&content) {
+                    active_ids.insert(meta.session_id);
+                }
+            }
+        }
+    }
+
+    let projects_dir = claude_dir.join("projects");
+    let project_dirs = match fs::read_dir(&projects_dir) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    for proj_entry in project_dirs.flatten() {
+        let proj_path = proj_entry.path();
+        if !proj_path.is_dir() {
+            continue;
+        }
+
+        let transcripts = match fs::read_dir(&proj_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        for t_entry in transcripts.flatten() {
+            let t_path = t_entry.path();
+            if t_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            let session_id = t_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+
+            // Skip if this is an active session
+            if active_ids.contains(session_id) {
+                continue;
+            }
+
+            // Skip transcripts not modified in the last 24 hours
+            if let Ok(metadata) = t_path.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    let age = modified.elapsed().unwrap_or_default();
+                    if age.as_secs() > 86400 {
+                        continue;
+                    }
+                }
+            }
+
+            // Extract metadata from transcript head
+            let meta = match transcript::read_transcript_meta(&t_path) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            let cwd = match meta.cwd {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let started_at = match meta.started_at {
+                Some(ts) => ts.with_timezone(&Local),
+                None => continue,
+            };
+
+            // Read tail for last activity time
+            let tail = transcript::read_transcript_tail(&t_path);
+            let last_activity = tail
+                .as_ref()
+                .and_then(|info| info.last_activity)
+                .map(|dt| dt.with_timezone(&Local));
+
+            out.push(Session {
+                cwd,
+                started_at,
+                name: None, // session file is gone, no name available
+                state: SessionState::Exited,
+                last_activity,
+            });
+        }
+    }
 }

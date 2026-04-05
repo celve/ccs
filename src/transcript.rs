@@ -19,6 +19,12 @@ pub struct TranscriptInfo {
     pub last_activity: Option<DateTime<FixedOffset>>,
 }
 
+/// Metadata extracted from a transcript file (for finished sessions with no session JSON).
+pub struct TranscriptMeta {
+    pub cwd: Option<String>,
+    pub started_at: Option<DateTime<FixedOffset>>,
+}
+
 #[derive(Deserialize)]
 struct Entry {
     #[serde(rename = "type")]
@@ -33,6 +39,39 @@ struct MessagePayload {
     role: Option<String>,
     stop_reason: Option<serde_json::Value>,
     content: Option<serde_json::Value>,
+}
+
+/// Extract metadata (cwd, first timestamp) from the beginning of a transcript.
+/// Reads only the first 8KB to find the first entry with a cwd and timestamp.
+pub fn read_transcript_meta(path: &Path) -> Option<TranscriptMeta> {
+    let mut file = File::open(path).ok()?;
+    let mut buf = vec![0u8; 8192];
+    let n = file.read(&mut buf).ok()?;
+    let text = std::str::from_utf8(&buf[..n]).ok()?;
+
+    let mut cwd = None;
+    let mut started_at = None;
+
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if cwd.is_none() {
+            if let Some(s) = v.get("cwd").and_then(|c| c.as_str()) {
+                cwd = Some(s.to_string());
+            }
+        }
+        if started_at.is_none() {
+            if let Some(ts) = v.get("timestamp").and_then(|t| t.as_str()) {
+                started_at = DateTime::parse_from_rfc3339(ts).ok();
+            }
+        }
+        if cwd.is_some() && started_at.is_some() {
+            break;
+        }
+    }
+
+    Some(TranscriptMeta { cwd, started_at })
 }
 
 /// Read the tail of a transcript JSONL and determine session state + last activity.
