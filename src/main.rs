@@ -24,6 +24,10 @@ struct Cli {
     /// Filter by state (working, idle, exited)
     #[arg(short = 's', long = "state")]
     state: Option<String>,
+
+    /// Output as JSON
+    #[arg(short = 'j', long = "json")]
+    json: bool,
 }
 
 fn main() {
@@ -79,13 +83,20 @@ fn main() {
     sessions.truncate(cli.count);
 
     if sessions.is_empty() {
-        println!("No sessions found.");
+        if cli.json {
+            println!("[]");
+        } else {
+            println!("No sessions found.");
+        }
         return;
     }
 
-    // Build tree and render
-    let tree = build_tree(&sessions);
-    render_tree(&tree, &now);
+    if cli.json {
+        render_json(&sessions, &now);
+    } else {
+        let tree = build_tree(&sessions);
+        render_tree(&tree, &now);
+    }
 }
 
 // --- Duration parsing ---
@@ -354,6 +365,30 @@ fn state_label_colored(state: &SessionState) -> String {
         SessionState::Tool(name) => format!("TOOL:{name}").blue().to_string(),
         SessionState::Exited => "EXITED".dimmed().to_string(),
     }
+}
+
+fn render_json(sessions: &[Session], now: &chrono::DateTime<Local>) {
+    let home = dirs::home_dir().unwrap_or_default();
+    let home_str = home.to_string_lossy();
+
+    let entries: Vec<serde_json::Value> = sessions
+        .iter()
+        .map(|s| {
+            let activity_time = s.last_activity.unwrap_or(s.started_at);
+            serde_json::json!({
+                "state": state_label_plain(&s.state),
+                "cwd": s.cwd,
+                "cwd_short": shorten_home(&s.cwd, &home_str),
+                "name": s.name,
+                "last_activity": activity_time.to_rfc3339(),
+                "last_activity_relative": format_relative(now.signed_duration_since(activity_time)),
+                "started_at": s.started_at.to_rfc3339(),
+                "started_at_time": s.started_at.format("%H:%M").to_string(),
+            })
+        })
+        .collect();
+
+    println!("{}", serde_json::to_string_pretty(&entries).unwrap());
 }
 
 fn format_relative(dur: chrono::Duration) -> String {
